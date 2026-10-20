@@ -4,4 +4,5 @@ data/
 .ipynb_checkpoints/
 __pycache__/
 .env
+mlflow_artifacts/
 
