@@ -11,7 +11,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 
-TEXT_COLUMNS = ["imt_name", "subj_name", "description"]
+TEXT_COLUMNS = ["imt_name", "subj_name"]
 
 
 def clean_text(value: object) -> str:
@@ -35,7 +35,8 @@ class SearchEngine:
 
         query_vector = self.vectorizer.transform([cleaned_query])
         scores = cosine_similarity(query_vector, self.matrix).ravel()
-        order = np.argsort(scores)[::-1][:top_k]
+        item_ids = self.catalog["imt_id"].to_numpy()
+        order = np.lexsort((item_ids, -scores))[:top_k]
 
         columns = [
             "imt_id",
@@ -54,34 +55,41 @@ def build_search_engine(data_dir: str | Path = "data") -> SearchEngine:
     data_dir = Path(data_dir)
     products_path = data_dir / "wb_products_raw_sample.parquet"
     train_path = data_dir / "queries_synthetic_train.parquet"
-
-    missing = [str(path) for path in (products_path, train_path) if not path.exists()]
+    test_path = data_dir / "queries_synthetic_test.parquet"
+    missing = [
+        str(path)
+        for path in (products_path, train_path, test_path)
+        if not path.exists()
+    ]
     if missing:
         raise FileNotFoundError("\n".join(missing))
 
     products = pd.read_parquet(products_path)
-    queries_train = pd.read_parquet(train_path)
-
+    labels = pd.concat(
+        [pd.read_parquet(train_path), pd.read_parquet(test_path)],
+        ignore_index=True,
+    )
     category_map = (
         products[["imt_id", "subj_root_name"]]
         .dropna(subset=["subj_root_name"])
         .drop_duplicates("imt_id")
     )
-    relevant_items = queries_train.loc[
-        queries_train["relevance"] >= 2, ["query_id", "item_id"]
-    ]
-    category_scores = (
-        relevant_items.merge(category_map, left_on="item_id", right_on="imt_id", how="left")
-        .groupby("subj_root_name")["query_id"]
-        .nunique()
-        .sort_values(ascending=False)
+    selected_categories = (
+        labels[["item_id"]]
+        .drop_duplicates()
+        .merge(category_map, left_on="item_id", right_on="imt_id", how="left")
+        ["subj_root_name"]
+        .dropna()
+        .unique()
     )
-    selected_categories = category_scores.head(3).index.tolist()
-
     catalog = products[products["subj_root_name"].isin(selected_categories)].copy()
     catalog["description_length"] = catalog["description"].fillna("").astype(str).str.len()
     catalog = (
-        catalog.sort_values("description_length", ascending=False)
+        catalog.sort_values(
+            ["description_length", "nm_id"],
+            ascending=[False, True],
+            kind="mergesort",
+        )
         .drop_duplicates("imt_id")
         .reset_index(drop=True)
     )
@@ -96,8 +104,6 @@ def build_search_engine(data_dir: str | Path = "data") -> SearchEngine:
         catalog["imt_name"]
         + " . "
         + catalog["subj_name"]
-        + " . "
-        + catalog["description"]
     ).str.replace(r"\s+", " ", regex=True).str.strip(" .")
 
     vectorizer = TfidfVectorizer(
